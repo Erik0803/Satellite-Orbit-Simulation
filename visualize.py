@@ -10,7 +10,7 @@ class SatelliteSimulation:
     
     # Simulation parameters
     DEFAULT_ALTITUDE = 700e3  # 700 km
-    DEFAULT_SPEED = 7508.0  # m/s
+    DEFAULT_SPEED = 7300  # m/s
     SIMULATION_RATE = 100  # Hz
     TIME_STEP = 1  # seconds
     
@@ -95,6 +95,12 @@ class SatelliteSimulation:
     
     def create_ui(self):
         """Create user interface elements"""
+        # Altitude input section
+        wtext(text="<b>Satellite Altitude (km):</b>\n")
+        wtext(text="Altitude: ")
+        self.altitude_input = winput(text=str(self.DEFAULT_ALTITUDE/1000), width=100, bind=self.update_altitude)
+        wtext(text=" km\n\n")
+        
         # Velocity input section
         wtext(text="<b>Initial Velocity Components (m/s):</b>\n")
         
@@ -116,7 +122,19 @@ class SatelliteSimulation:
         
         wtext(text="\n\n<b>Orbital Parameters:</b>\n")
         self.orbital_info = wtext(text="")
-        
+    
+    def get_altitude_from_input(self):
+        """Parse altitude input and return value in meters"""
+        try:
+            altitude_km = float(self.altitude_input.text)
+            # Ensure minimum altitude (above Earth's surface)
+            if altitude_km < 0:
+                altitude_km = 0
+                self.altitude_input.text = "0"
+            return altitude_km * 1000  # Convert to meters
+        except ValueError:
+            return None
+    
     def get_velocity_from_inputs(self):
         """Parse velocity inputs and return vector"""
         try:
@@ -126,6 +144,51 @@ class SatelliteSimulation:
             return vector(vx, vy, vz)
         except ValueError:
             return None
+    
+    def update_altitude(self, event=None):
+        """Update satellite altitude and recalculate orbital parameters"""
+        altitude = self.get_altitude_from_input()
+        if altitude is None:
+            return
+        
+        # Calculate new position (maintain same angle, change distance)
+        current_pos = self.satellite.pos
+        if mag(current_pos) > 0:
+            # Keep same direction but change distance
+            direction = current_pos.norm()
+        else:
+            # Default to X-axis if position is at origin
+            direction = vector(1, 0, 0)
+        
+        new_distance = self.EARTH_RADIUS + altitude
+        new_position = direction * new_distance
+        
+        # Update satellite position
+        self.satellite.pos = new_position
+        self.initial_position = new_position
+        
+        # Update velocity arrow position
+        self.velocity_arrow.pos = self.satellite.pos
+        
+        # Recalculate circular velocity for this altitude
+        circular_velocity = sqrt(self.G * self.EARTH_MASS / new_distance)
+        
+        # Update Y velocity to circular velocity (maintaining X and Z)
+        current_velocity = self.get_velocity_from_inputs()
+        if current_velocity is not None:
+            # Keep X and Z components, update Y to circular velocity
+            self.vy_input.text = str(int(circular_velocity))
+        else:
+            # Set default circular velocity
+            self.vx_input.text = "0"
+            self.vy_input.text = str(int(circular_velocity))
+            self.vz_input.text = "0"
+        
+        # Update all displays
+        self.update_velocity_vector()
+        
+        # Adjust scene range if necessary
+        scene.range = max(scene.range, 2.5 * new_distance)
     
     def update_velocity_vector(self, event=None):
         """Update velocity arrow and label based on input"""
@@ -157,6 +220,7 @@ class SatelliteSimulation:
         """Calculate and display orbital parameters"""
         r = mag(self.satellite.pos)
         v = mag(velocity)
+        altitude = (r - self.EARTH_RADIUS) / 1000  # km
         
         # Specific orbital energy
         energy = 0.5 * v**2 - self.G * self.EARTH_MASS / r
@@ -167,23 +231,42 @@ class SatelliteSimulation:
         # Escape velocity at current altitude
         v_escape = sqrt(2 * self.G * self.EARTH_MASS / r)
         
-        # Determine orbit type
+        # Calculate orbital period for circular orbit (if energy < 0)
         if energy < 0:
+            # Semi-major axis for elliptical orbit
+            semi_major_axis = -self.G * self.EARTH_MASS / (2 * energy)
+            # Orbital period using Kepler's third law
+            period_seconds = 2 * 3.14159 * sqrt(semi_major_axis**3 / (self.G * self.EARTH_MASS))
+            period_minutes = period_seconds / 60
+            period_display = f"{period_minutes:.1f} min"
+        else:
+            period_display = "N/A (escape trajectory)"
+        
+        # Determine orbit type
+        if energy < -100:  # Small buffer for numerical precision
             orbit_type = "Elliptical"
-        elif energy == 0:
-            orbit_type = "Parabolic (Escape)"
+        elif energy < 100:
+            orbit_type = "Near-Parabolic"
         else:
             orbit_type = "Hyperbolic (Escape)"
         
-        altitude = (r - self.EARTH_RADIUS) / 1000  # km
+        # Calculate velocity ratios for better understanding
+        v_ratio_circular = v / v_circular
+        v_ratio_escape = v / v_escape
         
         info_text = (
             f"Altitude: {altitude:.1f} km\n"
+            f"Orbital radius: {r/1000:.0f} km\n\n"
             f"Current speed: {v:.1f} m/s\n"
-            f"Circular speed: {v_circular:.1f} m/s\n"
-            f"Escape speed: {v_escape:.1f} m/s\n"
+            f"Circular speed: {v_circular:.1f} m/s ({v_ratio_circular:.2f}×)\n"
+            f"Escape speed: {v_escape:.1f} m/s ({v_ratio_escape:.2f}×)\n\n"
             f"Orbit type: {orbit_type}\n"
-            f"Specific energy: {energy:.0f} J/kg"
+            f"Orbital period: {period_display}\n"
+            f"Specific energy: {energy:.0f} J/kg\n\n"
+            f"<i>Tip: Speed ratios show:</i>\n"
+            f"<i>1.0× = circular orbit</i>\n"
+            f"<i>1.0-1.4× = elliptical orbit</i>\n"
+            f"<i>≥1.41× = escape trajectory</i>"
         )
         
         self.orbital_info.text = info_text
@@ -215,20 +298,32 @@ class SatelliteSimulation:
         """Reset simulation to initial state"""
         self.running = False
         
+        # Get current altitude setting
+        altitude = self.get_altitude_from_input()
+        if altitude is None:
+            altitude = self.DEFAULT_ALTITUDE
+        
+        # Calculate position at current altitude
+        new_distance = self.EARTH_RADIUS + altitude
+        self.initial_position = vector(new_distance, 0, 0)
+        
         # Reset satellite
         self.satellite.pos = self.initial_position
-        self.satellite.velocity = vector(0, self.DEFAULT_SPEED, 0)
         self.satellite.clear_trail()
         self.satellite.visible = True
+        
+        # Calculate circular velocity for current altitude
+        circular_velocity = sqrt(self.G * self.EARTH_MASS / new_distance)
+        self.satellite.velocity = vector(0, circular_velocity, 0)
         
         # Show UI elements
         self.velocity_arrow.visible = True
         self.velocity_label.visible = True
         self.info_label.visible = True
         
-        # Reset inputs
+        # Update inputs with circular velocity
         self.vx_input.text = "0"
-        self.vy_input.text = str(self.DEFAULT_SPEED)
+        self.vy_input.text = str(int(circular_velocity))
         self.vz_input.text = "0"
         
         self.update_velocity_vector()
@@ -239,6 +334,9 @@ class SatelliteSimulation:
         
         self.status_label.text = "Ready to launch"
         self.status_label.color = color.yellow
+        
+        # Adjust scene range
+        scene.range = max(2.5 * new_distance, 2.5 * mag(vector(self.EARTH_RADIUS + self.DEFAULT_ALTITUDE, 0, 0)))
     
     def create_explosion(self, position):
         """Create explosion animation when satellite crashes"""
